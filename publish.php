@@ -19,6 +19,15 @@ if (!function_exists('trayde_fatal_to_json')) {
 }
 ob_start();
 
+/* If an Apache router (e.g. a front-controller RewriteRule) hands another PHP file to this
+   script, bail out with readable JSON instead of running the wrong endpoint's code. */
+if (PHP_SAPI !== 'cli') {
+  $trayde_req = basename(isset($_SERVER['SCRIPT_NAME']) ? $_SERVER['SCRIPT_NAME'] : (isset($_SERVER['SCRIPT_FILENAME']) ? $_SERVER['SCRIPT_FILENAME'] : ''));
+  if ($trayde_req !== '' && $trayde_req !== 'publish.php') {
+    json_out_early('Server routing problem: publish.php was executed under the name "' . $trayde_req . '" (an Apache rewrite / front controller is intercepting it). Ask your host, or add "RewriteCond %{REQUEST_URI} !\.(php)$" before any RewriteRule in .htaccess.');
+  }
+}
+
 if (!is_file(__DIR__ . '/inc/config.php')) json_out_early('inc/config.php not found');
 require_once __DIR__ . '/inc/config.php';
 
@@ -191,6 +200,25 @@ if ($action === 'pull') {
   ));
 }
 
+if (!function_exists('trayde_walk')) {
+function trayde_walk(&$node) {
+  static $extMap = array('image/jpeg' => 'jpg', 'image/jpg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif');
+  if (is_array($node)) { foreach ($node as $k => $v) { trayde_walk($node[$k]); } return; }
+  if (!is_string($node) || strncmp($node, 'data:image/', 11) !== 0) return;
+  $comma = strpos($node, ',');
+  $head = substr($node, 5, $comma - 5);            // e.g. image/jpeg;base64
+  $mime = strtolower(strtok($head, ';'));
+  if ($comma === false || !isset($extMap[$mime]) || strpos($head, 'base64') === false) { $node = ''; return; }
+  $bin = base64_decode(substr($node, $comma + 1));
+  if ($bin === false || strlen($bin) < 20 || strlen($bin) > 20 * 1024 * 1024) { $node = ''; return; }
+  if (function_exists('getimagesizefromstring') && !@getimagesizefromstring($bin) && $mime !== 'image/webp') { $node = ''; return; }
+  $name = substr(sha1($bin), 0, 20) . '.' . $extMap[$mime];
+  $path = UPLOAD_DIR . '/' . $name;
+  if (!is_file($path)) { @file_put_contents($path, $bin, LOCK_EX); @chmod($path, 0644); $GLOBALS['trayde_saved']++; }
+  $node = 'uploads/' . $name;
+}
+}
+
 /* --- Single photo upload (dashboard sends photos one at a time) --- */
 if ($action === 'image') {
   ensure_dir(UPLOAD_DIR);
@@ -209,23 +237,6 @@ if (!is_array($data) || !is_array(g($data, 'fullContent'))) json_out(400, array(
 /* --- Convert any remaining embedded base64 images to real files in /uploads --- */
 ensure_dir(UPLOAD_DIR);
 trayde_walk($data);
-
-function trayde_walk(&$node) {
-  static $extMap = array('image/jpeg' => 'jpg', 'image/jpg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp', 'image/gif' => 'gif');
-  if (is_array($node)) { foreach ($node as $k => $v) { trayde_walk($node[$k]); } return; }
-  if (!is_string($node) || strncmp($node, 'data:image/', 11) !== 0) return;
-  $comma = strpos($node, ',');
-  $head = substr($node, 5, $comma - 5);            // e.g. image/jpeg;base64
-  $mime = strtolower(strtok($head, ';'));
-  if ($comma === false || !isset($extMap[$mime]) || strpos($head, 'base64') === false) { $node = ''; return; }
-  $bin = base64_decode(substr($node, $comma + 1));
-  if ($bin === false || strlen($bin) < 20 || strlen($bin) > 20 * 1024 * 1024) { $node = ''; return; }
-  if (function_exists('getimagesizefromstring') && !@getimagesizefromstring($bin) && $mime !== 'image/webp') { $node = ''; return; }
-  $name = substr(sha1($bin), 0, 20) . '.' . $extMap[$mime];
-  $path = UPLOAD_DIR . '/' . $name;
-  if (!is_file($path)) { @file_put_contents($path, $bin, LOCK_EX); @chmod($path, 0644); $GLOBALS['trayde_saved']++; }
-  $node = 'uploads/' . $name;
-}
 
 /* --- Strip anything private that slipped through --- */
 $privFields = array('purchasedFrom','purchasedContact','purchasedLocation','purchasedPhone','purchasedEmail','purchasePrice');

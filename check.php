@@ -87,6 +87,25 @@ row($rows, 'memory_limit', $ml === '-1' || to_bytes($ml) >= 128 * 1048576, $ml .
 $sj = __DIR__ . '/site-data.json';
 row($rows, 'site-data.json', true, is_file($sj) ? ('exists, last published ' . date('d M Y H:i', filemtime($sj))) : 'not created yet (normal until first successful publish)');
 
+// live enquiry.php test (catches crashes that publish's own guard can't see)
+$enqTest = 'skipped';
+if (is_file(__DIR__ . '/enquiry.php')) {
+  $ctx = stream_context_create(array('http' => array(
+    'method'  => 'POST',
+    'header'  => "Content-Type: application/json\r\n",
+    'content' => '{"__selftest":1}',
+    'ignore_errors' => true, 'timeout' => 10)));
+  $resp = @file_get_contents((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://')
+           . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '/enquiry.php', false, $ctx);
+  $st = $http_response_header ?? array();
+  $code = isset($st[0]) ? (int)preg_replace('/\D+(\d+).*/', '$1', $st[0]) : 0;
+  $enqTest = ($code === 422 || $code === 400)
+    ? 'OK — HTTP ' . $code . ', valid JSON rejection'
+    : 'PROBLEM — HTTP ' . $code . ' reply: ' . substr(trim(preg_replace('/\s+/', ' ', strip_tags((string)$resp))), 0, 160);
+  if ($resp !== null && $resp !== '') { $dec = json_decode($resp, true); if (!is_array($dec)) $enqTest = 'PROBLEM — reply was not JSON (HTTP ' . $code . '): ' . substr(preg_replace('/\s+/', ' ', $resp), 0, 160); }
+}
+row($rows, 'enquiry.php live test', strpos($enqTest, 'OK') === 0, $enqTest);
+
 // error_log tails
 $logs = array();
 foreach (array(__DIR__ . '/error_log', __DIR__ . '/inc/error_log', __DIR__ . '/php_errorlog') as $lf) {
