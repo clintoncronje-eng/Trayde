@@ -479,11 +479,26 @@ async function publishDashboardChanges(){
   if(!pw){toast("Enter your publish password.","bad");setPhpStatus("Awaiting password…");if(pwInput)pwInput.focus();return}
   var btn=document.getElementById("publishChangesBtn");if(btn){btn.disabled=true;btn.style.opacity=".6"}
   try{
-    // Step 1 — tiny request: proves PHP + password work
+    // Step 1a — no-password diagnostic: proves the endpoint itself is alive and names what's broken
+    var diagTxt="";
+    try{
+      var hdrs={"Content-Type":"application/json"};if(!sessGet("trayde_pub_pw"))hdrs["X-Trayde-Diag"]="1";
+      var dr=await fetch(PHP_PUBLISH_ENDPOINT,{method:"POST",headers:hdrs,body:JSON.stringify({action:"diagnostic"})});
+      var dt=await dr.text(),dj=null;try{dj=JSON.parse(dt.replace(/^\uFEFF/,""))}catch(e){}
+      if(dj&&dj.diag){var D=dj.diag;diagTxt=" [endpoint V"+(D.version||"?"")+" · PHP "+(D.php||"?")+" · config:"+(D.configFound?"found":"MISSING")+" · password:"+(D.passwordSet?"set":"NOT SET")+" · data:"+(D.dataWritable===true?"writable":D.dataWritable)+" · post_max_size:"+D.postMaxSize+"]";sessSet("trayde_ep_alive","1")}
+      else if(dr.status===404){throw new Error("publish.php returned 404 — it is not in public_html on the server. Upload publish.php (and enquiry.php, inc/, data/, uploads/) next to index.html."+diagTxt)}
+      else{diagTxt=" [endpoint replied HTTP "+dr.status+" without JSON — an Apache rewrite or old script is intercepting publish.php]"}
+    }catch(de){
+      if(de instanceof TypeError){throw new Error("Network error talking to publish.php — the request never reached PHP (host firewall / mod_security). If trayde.co.za/check.php also fails to open, the files on the server are not the current ones: re-upload publish.php, check.php and trayde-setup.php into public_html."+diagTxt)}
+      throw new Error("publish.php failed its basic health check: "+de.message+diagTxt);
+    }
+    // Step 1b — password check
     setPhpStatus("Step 1/3 · Checking server & password…");
     try{await phpPost({action:"ping",auth:pw})}
     catch(e){
-      if(e.raw)throw new Error("The server's PHP crashed on a tiny test request ("+e.message+"). This is a hosting setup issue, not your content. Open trayde.co.za/check.php and look at the error_log file in File Manager — it names the exact line.");
+      if(e.raw)throw new Error("The server's PHP crashed on a tiny test request ("+e.message+"). This is a hosting setup issue, not your content. Open trayde.co.za/check.php and look at the error_log file in File Manager — it names the exact line."+diagTxt);
+      if(String(e.message||"").indexOf("Wrong publish password")>=0)throw new Error("Wrong publish password. It must be exactly the PUBLISH_PASSWORD value in inc/config.php on the server (not the dashboard login password). Run trayde-setup.php to set it again if needed."+diagTxt);
+      e.message=(e.message||"")+(diagTxt?"\n"+diagTxt:"");
       throw e;
     }
     // Step 2 — upload photos one at a time

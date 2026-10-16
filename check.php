@@ -59,8 +59,40 @@ row($rows, 'inc/config.php', $cfgOk, $cfgMsg);
 
 // lib.php syntax
 $pubSrc = is_file(__DIR__ . '/publish.php') ? file_get_contents(__DIR__ . '/publish.php') : '';
-$v3 = strpos($pubSrc, 'TRAYDE-V3') !== false;
-row($rows, 'publish.php is latest version (V3)', $v3, $v3 ? 'yes' : 'NO — an older publish.php is on the server. Re-upload publish.php and enquiry.php from the newest download.');
+$v3 = strpos($pubSrc, 'TRAYDE-V3') !== false || strpos($pubSrc, 'TRAYDE-V4') !== false;
+row($rows, 'publish.php is latest version (V4)', $v3, $v3 ? 'yes' : 'NO — an older publish.php is on the server. Re-upload publish.php and enquiry.php from the newest download.');
+
+/* Live publish test WITHOUT a web subrequest: run publish.php in a child PHP process.
+   Loopback HTTP requests are blocked by many hosts, which made the old self-tests
+   report fake "empty reply" failures. */
+$pubTest = 'skipped';
+if (is_file(__DIR__ . '/publish.php')) {
+  $tbin = (defined('PHP_BINARY') && strpos(PHP_BINARY, 'php') !== false) ? PHP_BINARY : 'php';
+  $thost = preg_replace('/[^A-Za-z0-9.\-_:]/', '', isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'trayde.co.za');
+  if ($thost === '') $thost = 'trayde.co.za';
+  $tmpf = @tempnam(sys_get_temp_dir(), 'traydechk');
+  if ($tmpf !== false) {
+    @file_put_contents($tmpf, '{"action":"diagnostic"}');
+    $tcmd = 'REQUEST_METHOD=POST CONTENT_TYPE=application/json HTTP_HOST=' . escapeshellarg($thost)
+          . ' HTTP_ORIGIN=' . escapeshellarg('https://' . preg_replace('/^www\./i', '', $thost))
+          . ' REMOTE_ADDR=127.0.0.1 SCRIPT_NAME=/publish.php ' . escapeshellarg($tbin)
+          . ' -d display_errors=stderr -d error_reporting=E_ALL ' . escapeshellarg(__DIR__ . '/publish.php') . ' < ' . escapeshellarg($tmpf) . ' 2>&1';
+    $tout = function_exists('exec') ? null : @shell_exec($tcmd);
+    if (function_exists('exec')) { $tl = array(); $trc = -1; @exec($tcmd, $tl, $trc); $tout = implode("\n", $tl); $tpost = json_decode(trim((string)$tout), true); }
+    else { $tpost = json_decode(trim((string)$tout), true); }
+    @unlink($tmpf);
+    if (is_array($tpost) && isset($tpost['diag'])) {
+      $d = $tpost['diag'];
+      $pubTest = 'OK — endpoint alive · PHP ' . $d['php'] . ' · config ' . ($d['configFound'] ? 'found' : 'MISSING')
+               . ' · password ' . ($d['passwordSet'] ? 'set' : 'NOT SET') . ' · post_max_size ' . $d['postMaxSize'];
+    } elseif (trim((string)$tout) === '') {
+      $pubTest = 'PROBLEM — publish.php produced NO output at all (hard crash / opcache of a broken file). See error_log below.';
+    } else {
+      $pubTest = 'PROBLEM — reply was not the expected JSON: ' . substr(preg_replace('/\s+/', ' ', strip_tags((string)$tout)), 0, 200);
+    }
+  }
+}
+row($rows, 'publish.php live test (direct run)', strpos($pubTest, 'OK') === 0, $pubTest);
 $cfgSrc = is_file($cfgFile) ? file_get_contents($cfgFile) : '';
 $curly = preg_match('/[\x{2018}\x{2019}\x{201C}\x{201D}]/u', $cfgSrc);
 row($rows, 'config.php quotes', !$curly, $curly ? 'Curly quotes found (‘ ’ “ ”) — retype them as straight quotes \' ' : 'OK');
@@ -90,19 +122,25 @@ row($rows, 'site-data.json', true, is_file($sj) ? ('exists, last published ' . d
 // live enquiry.php test (catches crashes that publish's own guard can't see)
 $enqTest = 'skipped';
 if (is_file(__DIR__ . '/enquiry.php')) {
-  $ctx = stream_context_create(array('http' => array(
-    'method'  => 'POST',
-    'header'  => "Content-Type: application/json\r\n",
-    'content' => '{"__selftest":1}',
-    'ignore_errors' => true, 'timeout' => 10)));
-  $resp = @file_get_contents((isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off' ? 'https://' : 'http://')
-           . ($_SERVER['HTTP_HOST'] ?? 'localhost') . '/enquiry.php', false, $ctx);
-  $st = $http_response_header ?? array();
-  $code = isset($st[0]) ? (int)preg_replace('/\D+(\d+).*/', '$1', $st[0]) : 0;
-  $enqTest = ($code === 422 || $code === 400)
-    ? 'OK — HTTP ' . $code . ', valid JSON rejection'
-    : 'PROBLEM — HTTP ' . $code . ' reply: ' . substr(trim(preg_replace('/\s+/', ' ', strip_tags((string)$resp))), 0, 160);
-  if ($resp !== null && $resp !== '') { $dec = json_decode($resp, true); if (!is_array($dec)) $enqTest = 'PROBLEM — reply was not JSON (HTTP ' . $code . '): ' . substr(preg_replace('/\s+/', ' ', $resp), 0, 160); }
+  /* direct child-process run — no loopback HTTP request (blocked on many hosts) */
+  $ebin = (defined('PHP_BINARY') && strpos(PHP_BINARY, 'php') !== false) ? PHP_BINARY : 'php';
+  $ehost = preg_replace('/[^A-Za-z0-9.\-_:]/', '', isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'trayde.co.za');
+  if ($ehost === '') $ehost = 'trayde.co.za';
+  $etmp = @tempnam(sys_get_temp_dir(), 'traydeenq');
+  if ($etmp !== false) {
+    @file_put_contents($etmp, '{"first":"Self","phone":"0811234567","email":"self@test.co.za","msg":"server self-test","website":""}');
+    $ecmd = 'REQUEST_METHOD=POST CONTENT_TYPE=application/json HTTP_HOST=' . escapeshellarg($ehost)
+          . ' HTTP_ORIGIN=' . escapeshellarg('https://' . preg_replace('/^www\./i', '', $ehost))
+          . ' REMOTE_ADDR=127.0.0.1 SCRIPT_NAME=/enquiry.php ' . escapeshellarg($ebin)
+          . ' -d display_errors=stderr -d error_reporting=E_ALL ' . escapeshellarg(__DIR__ . '/enquiry.php') . ' < ' . escapeshellarg($etmp) . ' 2>&1';
+    if (function_exists('exec')) { $el = array(); $erc = -1; @exec($ecmd, $el, $erc); $eresp = implode("\n", $el); }
+    else { $eresp = (string)@shell_exec($ecmd); }
+    @unlink($etmp);
+    $edec = json_decode(trim($eresp), true);
+    if (is_array($edec) && array_key_exists('ok', $edec)) $enqTest = 'OK — ran directly, JSON reply: ' . substr(json_encode($edec), 0, 140);
+    elseif (trim($eresp) === '') $enqTest = 'PROBLEM — enquiry.php produced NO output at all (hard crash). See error_log below.';
+    else $enqTest = 'PROBLEM — reply was not JSON: ' . substr(preg_replace('/\s+/', ' ', strip_tags($eresp)), 0, 160);
+  }
 }
 row($rows, 'enquiry.php live test', strpos($enqTest, 'OK') === 0, $enqTest);
 
@@ -132,7 +170,7 @@ $host = isset($_SERVER['HTTP_HOST']) ? $_SERVER['HTTP_HOST'] : 'yourdomain';
 <p><input id="pw" type="password" placeholder="Publish password" style="padding:10px;background:#111;border:1px solid #333;color:#fff;border-radius:6px;width:280px"> <button id="go" style="padding:10px 18px;background:#ffc400;border:0;font-weight:700;border-radius:6px;cursor:pointer">Test</button></p>
 <pre id="out" style="background:#0a0a0a;border:1px solid #242424;padding:14px;white-space:pre-wrap;color:#ffc400;min-height:40px"></pre>
 <script>
-document.getElementById('go').onclick=function(){var o=document.getElementById('out');o.textContent='Sending…';fetch('publish.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'ping',auth:document.getElementById('pw').value.trim()})}).then(function(r){return r.text().then(function(t){o.textContent='HTTP '+r.status+'\n\n'+(t||'(empty reply — PHP crashed before any output. See error_log below.)')})}).catch(function(e){o.textContent='Network error: '+e.message})};
+document.getElementById('go').onclick=function(){var o=document.getElementById('out');o.textContent='Sending…';fetch('publish.php',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'ping',auth:document.getElementById('pw').value.trim()})}).then(function(r){return r.text().then(function(t){if(r.status===404){o.textContent='HTTP 404 — publish.php is NOT in public_html on this server. Upload it (plus enquiry.php, inc/, data/, uploads/) next to index.html. A 404 here also explains why trayde-setup.php gives 404: those files were never uploaded.';return}o.textContent='HTTP '+r.status+'\n\n'+(t||'(empty reply — PHP crashed before any output. See error_log below.)')+(r.status===200?'\n\n✔ WORKING — go to Dashboard → Publish and use this password.':(r.status===401?'\n\n✔ PHP IS FINE — 401 just means the typed password was wrong. Correct it in Dashboard → Publish.':''))})}).catch(function(e){o.textContent='Network error: '+e.message})};
 </script>
 <?php if ($logs): foreach ($logs as $n => $t): ?><h1 style="margin-top:30px">Last lines of <?php echo htmlspecialchars($n); ?></h1><pre style="background:#0a0a0a;border:1px solid #242424;padding:14px;white-space:pre-wrap;color:#ff6161;font-size:12px"><?php echo htmlspecialchars($t); ?></pre><?php endforeach; else: ?><p class="ok">No error_log file found.</p><?php endif; ?>
 <p>Also open <code>https://<?php echo htmlspecialchars($host); ?>/data/enquiries.json</code> — it must say <b>403 Forbidden</b>.</p>

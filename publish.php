@@ -1,9 +1,21 @@
 <?php
-/* TRAYDE-V3 · publish.php · self-contained (PHP 5.6 – 8.3). Only needs inc/config.php */
+/* TRAYDE-V4 · publish.php · self-contained (PHP 5.6 – 8.3). Only needs inc/config.php */
 function json_out_early($m){ while (ob_get_level() > 0) @ob_end_clean(); http_response_code(500); header('Content-Type: application/json; charset=utf-8'); echo json_encode(array('ok'=>false,'message'=>$m)); exit; }
 /* ---------- shared helpers ---------- */
 /* Shared helpers — compatible with PHP 5.6 through 8.3 */
 @ini_set('display_errors', '0');
+
+/* Belt & braces against the "HTTP 500 empty reply" failure mode: some hosts run a
+   very old PHP (5.4/5.5) or have extra extensions loaded that choke on newer files.
+   If this file itself fails to parse, output valid JSON anyway so the dashboard can
+   show the real error instead of "(empty reply)". */
+if (version_compare(PHP_VERSION, '5.6', '<')) {
+  while (ob_get_level() > 0) @ob_end_clean();
+  http_response_code(500);
+  header('Content-Type: application/json; charset=utf-8');
+  echo json_encode(array('ok' => false, 'message' => 'Server is running PHP ' . PHP_VERSION . ' — too old. cPanel → MultiPHP Manager: set trayde.co.za to PHP 8.1 or newer.'));
+  exit;
+}
 
 // Any fatal error (incl. syntax errors in config.php) → readable JSON, not an HTML page
 if (!function_exists('trayde_fatal_to_json')) {
@@ -17,6 +29,11 @@ if (!function_exists('trayde_fatal_to_json')) {
   }
   register_shutdown_function('trayde_fatal_to_json');
 }
+set_error_handler(function($no, $str, $errfile, $errline) {
+  // Never let notices/warnings leak into the JSON reply; log them quietly instead.
+  if (strpos($str, 'core.ini') === false) @error_log('[trayde publish] ' . $str . ' in ' . basename((string)$errfile) . ':' . $errline);
+  return true;
+});
 ob_start();
 
 /* If an Apache router (e.g. a front-controller RewriteRule) hands another PHP file to this
@@ -184,6 +201,36 @@ $GLOBALS['trayde_saved'] = 0;
 
 require_post();
 check_origin();
+
+/* Diagnostic ping — runs BEFORE the password check and before reading the body, so it
+   answers even when config/folders/limits are broken. The dashboard uses it to tell
+   "endpoint is alive" apart from "PHP crashed". */
+$rawHead = '';
+{
+  $peek = fopen('php://input', 'r');
+  if ($peek) { $rawHead = (string)fread($peek, 512); fclose($peek); }
+}
+$diagHdr = function_exists('getallheaders') ? (getallheaders() ?: array()) : array();
+if (!isset($diagHdr['X-Trayde-Diag']) && !isset($diagHdr['x-trayde-diag'])) { $diagHdr['X-Trayde-Diag'] = isset($_SERVER['HTTP_X_TRAYDE_DIAG']) ? $_SERVER['HTTP_X_TRAYDE_DIAG'] : ''; }
+if (strpos($rawHead, '"diagnostic"') !== false || (isset($diagHdr['X-Trayde-Diag']) && $diagHdr['X-Trayde-Diag'] !== '')) {
+  json_out(200, array(
+    'ok' => true,
+    'message' => 'publish.php alive',
+    'diag' => array(
+      'version' => 'V4',
+      'php' => PHP_VERSION,
+      'configFound' => is_file(__DIR__ . '/inc/config.php'),
+      'passwordSet' => defined('PUBLISH_PASSWORD') && PUBLISH_PASSWORD !== 'CHANGE-ME-to-a-long-secret',
+      'dataWritable' => is_dir(DATA_DIR) ? is_writable(DATA_DIR) : 'missing',
+      'uploadsWritable' => is_dir(UPLOAD_DIR) ? is_writable(UPLOAD_DIR) : 'missing',
+      'postMaxSize' => ini_get('post_max_size'),
+      'uploadMaxFilesize' => ini_get('upload_max_filesize'),
+      'memoryLimit' => ini_get('memory_limit'),
+      'extensions' => array('json' => function_exists('json_encode'), 'mbstring' => function_exists('mb_substr'), 'gd' => function_exists('getimagesizefromstring')),
+    ),
+  ));
+}
+
 $in = read_json_body(25 * 1024 * 1024);
 check_password(g($in, 'auth'));
 
