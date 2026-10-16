@@ -1,0 +1,3 @@
+.env
+data/private.json
+data/backup-*.json

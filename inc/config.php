@@ -5,7 +5,7 @@
    ========================================================= */
 
 // 1) PUBLISH PASSWORD — used by Dashboard → Publish and "Sync from website".
-define('PUBLISH_PASSWORD', 'CHANGE-ME-to-a-long-secret');
+define('PUBLISH_PASSWORD', 'Test-Secret-123');
 
 // 2) Where new website enquiries are emailed.
 define('NOTIFY_EMAIL', 'adrian@trayde.co.za');
